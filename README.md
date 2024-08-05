@@ -64,7 +64,7 @@ Este projeto tem como objetivo extrair, analisar e processar arquivos de áudio 
 1. Clone o repositório:
 
     ```bash
-    git clone https://github.com/seu-nome/seu-repositorio.git
+    git clone https://github.com/viniciuslo/AudioMetrics.git
     cd seu-repositorio
     ```
 
