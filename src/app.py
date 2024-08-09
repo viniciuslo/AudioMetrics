@@ -1,137 +1,175 @@
-import streamlit as st
-from streamlit_option_menu import option_menu
-import pandas as pd
+import logging
 import os
-import numpy as np
-import librosa
-import librosa.display
-import matplotlib.pyplot as plt
-from analyzer import analyze_audio_for_parameters, save_audio_analysis
-from enhancer import AudioProcessor
+import concurrent.futures
+import shutil
+import streamlit as st
 from extractor import extract_audio
+from analyzer import save_audio_analysis, analyze_audio_for_parameters
+from enhancer import AudioProcessor
 from pydub import AudioSegment
-import plotly.express as px
-import tempfile
+from config import create_directory_if_not_exists, input_folder, staging_folder, treated_folder, converted_folder, input_folder, noise_reduction_prop, low_cutoff_frequency, high_cutoff_frequency
 
-# Função para coletar métricas de áudio
-def collect_audio_metrics(folder):
-    metrics_list = []
+# Configuração do logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    if not os.path.exists(folder):
-        st.error(f"A pasta '{folder}' não existe. Por favor, execute o processamento de áudio primeiro.")
-        return pd.DataFrame()  # Retorna um DataFrame vazio
+def process_file(processor, input_path, treated_path, noise_reduction_prop, low_cutoff, high_cutoff):
+    try:
+        logging.info(f"Tratando o áudio: {input_path}")
+        y, sr, metrics = analyze_audio_for_parameters(input_path)
+        processor.enhance_audio(y, sr, metrics, treated_path, noise_reduction_prop, low_cutoff, high_cutoff)
+    except Exception as e:
+        logging.error(f"Erro ao processar arquivo: {e}")
 
+def treat_audio_concurrently(input_folder, treated_folder, processor, noise_reduction_prop, low_cutoff, high_cutoff):
+    create_directory_if_not_exists(input_folder)
+    create_directory_if_not_exists(treated_folder)
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = []
+        for filename in os.listdir(input_folder):
+            if filename.endswith('.wav'):
+                input_path = os.path.join(input_folder, filename)
+                treated_path = os.path.join(treated_folder, filename.replace('.wav', '.mp3'))
+                futures.append(executor.submit(process_file, processor, input_path, treated_path, noise_reduction_prop, low_cutoff, high_cutoff))
+
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                logging.error(f"Erro ao processar arquivo: {e}")
+
+def convert_audio_to_mp3(input_folder, converted_folder):
+    create_directory_if_not_exists(input_folder)
+    create_directory_if_not_exists(converted_folder)
+
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.wav'):
+            input_path = os.path.join(input_folder, filename)
+            converted_path = os.path.join(converted_folder, filename.replace('.wav', '.mp3'))
+
+            try:
+                logging.info(f"Convertendo o áudio: {input_path}")
+                audio = AudioSegment.from_wav(input_path)
+                audio.export(converted_path, format='mp3')
+                logging.info(f"Áudio convertido salvo em {converted_path}")
+            except Exception as e:
+                logging.error(f"Erro ao converter {filename}: {e}")
+
+def analyze_audio(folder, stage):
+    analysis_folder = os.path.join(folder, 'analysis')
+    create_directory_if_not_exists(analysis_folder)
     for filename in os.listdir(folder):
         if filename.endswith('.wav') or filename.endswith('.mp3'):
             input_path = os.path.join(folder, filename)
-            y, sr, prop_decrease, metrics = analyze_audio_for_parameters(input_path)
-            metrics['filename'] = filename
-            metrics_list.append(metrics)
+            logging.info(f"Analisando o áudio {stage}: {input_path}")
+            save_audio_analysis(input_path, analysis_folder, stage=stage)
 
-    return pd.DataFrame(metrics_list)
+def list_files_in_folder(folder):
+    files = []
+    for filename in os.listdir(folder):
+        if filename.endswith('.wav') or filename.endswith('.mp3') or filename.endswith('.mp4'):
+            files.append(filename)
+    return files
 
-# Função para processar o áudio
-def process_audio(file, noise_reduction_prop, eq_cutoff):
-    with tempfile.TemporaryDirectory() as tmpdir:
-        temp_input_path = os.path.join(tmpdir, file.name)
-        with open(temp_input_path, 'wb') as f:
-            f.write(file.getbuffer())
+def clear_folder(folder):
+    for filename in os.listdir(folder):
+        file_path = os.path.join(folder, filename)
+        try:
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path) and filename != 'analysis':
+                shutil.rmtree(file_path)
+        except Exception as e:
+            logging.error(f'Erro ao deletar {file_path}. Motivo: {e}')
 
-        processor = AudioProcessor()
-        y, sr, prop_decrease, metrics = analyze_audio_for_parameters(temp_input_path)
-        processed_audio_path = os.path.join(tmpdir, 'processed_audio.mp3')
-        processor.enhance_audio(y, sr, prop_decrease, metrics, processed_audio_path, noise_reduction_prop, eq_cutoff)
+def main():
+    st.title("Processamento de Áudio")
 
-        with open(processed_audio_path, 'rb') as f:
-            processed_audio = f.read()
+    processor = AudioProcessor()
 
-    return processed_audio, metrics, y, sr
+    # Sidebar Menu
+    menu = st.sidebar.selectbox("Escolha uma opção", ["Home", "Extrair Áudio", "Tratar Áudio", "Converter Áudio", "Analisar Áudio", "Visualizar Arquivos"])
 
-# Função para gerar espectrograma
-def generate_spectrogram(y, sr, title):
-    plt.figure(figsize=(10, 4))
-    D = librosa.amplitude_to_db(np.abs(librosa.stft(y)), ref=np.max)
-    librosa.display.specshow(D, sr=sr, x_axis='time', y_axis='log')
-    plt.colorbar(format='%+2.0f dB')
-    plt.title(title)
-    st.pyplot(plt)
+    if menu == "Home":
+        st.write("Bem-vindo ao Processamento de Áudio. Use o menu à esquerda para selecionar uma ação.")
 
-# Interface do Streamlit
-st.set_page_config(page_title="Sistema de Processamento de Áudio", layout="wide")
+    if menu == "Extrair Áudio":
+        st.subheader("Upload de Vídeos")
+        uploaded_videos = st.file_uploader("Faça upload dos seus vídeos", accept_multiple_files=True, type=["mp4", "mov", "avi"])
 
-with st.sidebar:
-    selected = option_menu(
-        "Menu Principal", 
-        ["Extrair Áudio", "Tratar Áudio", "Converter Áudio", "Analisar Áudio"], 
-        icons=['cloud-upload', 'wrench', 'repeat', 'bar-chart'],
-        menu_icon="cast", 
-        default_index=0,
-    )
+        if uploaded_videos:
+            for uploaded_video in uploaded_videos:
+                video_path = os.path.join(input_folder, uploaded_video.name)
+                with open(video_path, "wb") as f:
+                    f.write(uploaded_video.getbuffer())
+                st.success(f"Arquivo {uploaded_video.name} salvo com sucesso!")
 
-if selected == "Extrair Áudio":
-    st.title("Extrair Áudio dos Vídeos")
-    video_folder = st.text_input("Pasta de Vídeos", "./videos")
-    output_folder = "./staging"
-    if st.button("Extrair Áudio"):
-        if os.path.exists(video_folder):
-            extract_audio(video_folder, output_folder)
-            st.success(f"Áudio extraído e salvo em {output_folder}")
+        if st.button('Fazer upload do Google Drive'):
+            st.info("Funcionalidade de upload do Google Drive ainda não implementada.")
+
+        st.subheader("Arquivos de Vídeo na Pasta de Entrada")
+        video_files = list_files_in_folder(input_folder)
+        if video_files:
+            for file in video_files:
+                st.text(file)
         else:
-            st.error("A pasta de vídeos não existe. Verifique o caminho e tente novamente.")
+            st.write("Nenhum arquivo de vídeo encontrado.")
 
-elif selected == "Tratar Áudio":
-    st.title("Tratar Áudio Extraído")
-    uploaded_file = st.file_uploader("Faça upload de um arquivo de áudio (WAV)", type=["wav"])
-    noise_reduction_prop = st.slider("Proporção de Redução de Ruído", 0.0, 1.0, 0.5)
-    eq_cutoff = st.slider("Corte de Equalização (Hz)", 500, 15000, 8000)
-    if uploaded_file:
-        st.audio(uploaded_file, format='audio/wav')
-        if st.button("Processar Áudio"):
-            processed_audio, metrics, y, sr = process_audio(uploaded_file, noise_reduction_prop, eq_cutoff)
-            st.audio(processed_audio, format='audio/mp3')
-            st.subheader("Métricas de Áudio")
-            metrics_df = pd.DataFrame([metrics])
-            st.write(metrics_df)
-            selected_metric = st.selectbox(
-                'Escolha uma métrica para visualizar',
-                [col for col in metrics_df.columns if col != 'filename']
-            )
-            fig = px.box(metrics_df, y=selected_metric, points="all")
-            st.plotly_chart(fig)
-            st.subheader("Espectrograma Original")
-            generate_spectrogram(y, sr, "Espectrograma Original")
+        if st.button('Extrair Áudio dos Vídeos'):
+            extract_audio(input_folder, staging_folder)
+            st.success('Áudio extraído com sucesso!')
 
-elif selected == "Converter Áudio":
-    st.title("Converter Áudio para MP3 sem Tratamento")
-    staging_folder = "./staging"
-    converted_folder = "./converted"
-    if st.button("Converter Áudio"):
-        if os.path.exists(staging_folder):
-            for filename in os.listdir(staging_folder):
-                if filename.endswith('.wav'):
-                    input_path = os.path.join(staging_folder, filename)
-                    converted_path = os.path.join(converted_folder, filename.replace('.wav', '.mp3'))
-                    audio = AudioSegment.from_wav(input_path)
-                    audio.export(converted_path, format='mp3')
-                    st.success(f"Áudio convertido e salvo em {converted_folder}")
+    if menu == "Tratar Áudio":
+        st.subheader("Parâmetros de Tratamento de Áudio")
+
+        # Sliders para parâmetros ajustáveis
+        noise_reduction_prop = st.slider("Proporção de Redução de Ruído", 0.0, 1.0, 0.5)
+        low_cutoff = st.slider("Frequência de Corte Baixa (Hz)", 20, 500, 100)
+        high_cutoff = st.slider("Frequência de Corte Alta (Hz)", 5000, 16000, 8000)
+
+        if st.button('Tratar Áudio Extraído'):
+            treat_audio_concurrently(staging_folder, treated_folder, processor, noise_reduction_prop, low_cutoff, high_cutoff)
+            st.success('Áudio tratado com sucesso!')
+
+    if menu == "Converter Áudio":
+        if st.button('Converter Áudio para MP3 sem Tratamento'):
+            convert_audio_to_mp3(staging_folder, converted_folder)
+            st.success('Áudio convertido com sucesso!')
+
+    if menu == "Analisar Áudio":
+        analysis_stage = st.selectbox("Selecione o estágio para análise", ["original", "treated", "converted"])
+        folder_mapping = {
+            "original": staging_folder,
+            "treated": treated_folder,
+            "converted": converted_folder
+        }
+        selected_folder = folder_mapping[analysis_stage]
+
+        if st.button(f'Analisar Áudio {analysis_stage.capitalize()}'):
+            analyze_audio(selected_folder, analysis_stage)
+            st.success(f'Análise do áudio {analysis_stage} concluída!')
+
+    if menu == "Visualizar Arquivos":
+        st.subheader("Arquivos de Áudio")
+        folder_option = st.selectbox("Selecione a pasta", ["staging", "treated", "converted"])
+        folder_mapping = {
+            "staging": staging_folder,
+            "treated": treated_folder,
+            "converted": converted_folder
+        }
+        selected_folder = folder_mapping[folder_option]
+
+        files = list_files_in_folder(selected_folder)
+        if files:
+            st.write(f"Arquivos na pasta {folder_option}:")
+            for file in files:
+                st.text(file)
         else:
-            st.error("A pasta staging não existe. Verifique o caminho e tente novamente.")
+            st.write(f"Não há arquivos na pasta {folder_option}.")
 
-elif selected == "Analisar Áudio":
-    st.title("Analisar Áudio")
-    folder = st.selectbox("Escolha a pasta para análise", ["./staging", "./treated", "./converted"])
-    if os.path.exists(folder):
-        metrics_df = collect_audio_metrics(folder)
-        if not metrics_df.empty:
-            st.subheader("Métricas de Áudio")
-            st.write(metrics_df)
-            selected_metric = st.selectbox(
-                'Escolha uma métrica para visualizar',
-                [col for col in metrics_df.columns if col != 'filename']
-            )
-            fig = px.box(metrics_df, y=selected_metric, points="all")
-            st.plotly_chart(fig)
-        else:
-            st.warning("Nenhum dado disponível para visualização. Por favor, execute o processamento de áudio primeiro.")
-    else:
-        st.error("A pasta selecionada não existe. Verifique o caminho e tente novamente.")
+        if st.button('Limpar Pasta Selecionada'):
+            clear_folder(selected_folder)
+            st.success(f"Pasta {folder_option} limpa com sucesso!")
+
+if __name__ == "__main__":
+    main()
