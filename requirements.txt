@@ -157,3 +157,7 @@ webrtcvad==2.0.10
 websocket-client==1.8.0
 Werkzeug==3.0.3
 zipp==3.19.2
+pytube
+youtube_dl
+yt_dlp
+scikit-learn
